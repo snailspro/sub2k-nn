@@ -23,28 +23,42 @@ int8_t infer(const uint8_t* pixels, int32_t* outScores) {
   int32_t hidden[NN_HIDDEN_SIZE];
 
   
-  for (uint8_t j = 0; j < NN_HIDDEN_SIZE; j++) {
-    int32_t acc = (int32_t)pgm_read_dword(&NN_B1[j]);
+  for (uint8_t j = 0; j < NN_HIDDEN_SIZE; j += 2) {
+    int32_t acc0 = (int32_t)pgm_read_dword(&NN_B1[j]);
+    int32_t acc1 = (int32_t)pgm_read_dword(&NN_B1[j+1]);
     for (uint8_t i = 0; i < NN_INPUT_SIZE; i++) {
-      int8_t w = (int8_t)pgm_read_byte(&NN_W1[i][j]);
-      acc += (int32_t)pixels[i] * w;
+      uint8_t packed = pgm_read_byte(&NN_W1[i][j/2]);
+      int8_t w0 = (int8_t)(packed & 0xF0) >> 4;
+      int8_t w1 = (int8_t)(packed << 4) >> 4;
+      acc0 += (int32_t)pixels[i] * w0;
+      acc1 += (int32_t)pixels[i] * w1;
     }
-    hidden[j] = acc > 0 ? acc : 0; 
+    hidden[j] = acc0 > 0 ? acc0 : 0; 
+    hidden[j+1] = acc1 > 0 ? acc1 : 0; 
   }
 
   
   int8_t bestClass = 0;
   int32_t bestScore = -2147483647L;
-  for (uint8_t k = 0; k < NN_NUM_CLASSES; k++) {
-    int32_t acc = (int32_t)pgm_read_dword(&NN_B2[k]);
+  for (uint8_t k = 0; k < NN_NUM_CLASSES; k += 2) {
+    int32_t acc0 = (int32_t)pgm_read_dword(&NN_B2[k]);
+    int32_t acc1 = (int32_t)pgm_read_dword(&NN_B2[k+1]);
     for (uint8_t j = 0; j < NN_HIDDEN_SIZE; j++) {
-      int8_t w = (int8_t)pgm_read_byte(&NN_W2[j][k]);
-      acc += hidden[j] * w;
+      uint8_t packed = pgm_read_byte(&NN_W2[j][k/2]);
+      int8_t w0 = (int8_t)(packed & 0xF0) >> 4;
+      int8_t w1 = (int8_t)(packed << 4) >> 4;
+      acc0 += hidden[j] * w0;
+      acc1 += hidden[j] * w1;
     }
-    outScores[k] = acc;
-    if (acc > bestScore) {
-      bestScore = acc;
+    outScores[k] = acc0;
+    if (acc0 > bestScore) {
+      bestScore = acc0;
       bestClass = k;
+    }
+    outScores[k+1] = acc1;
+    if (acc1 > bestScore) {
+      bestScore = acc1;
+      bestClass = k+1;
     }
   }
 

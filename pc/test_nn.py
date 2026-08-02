@@ -20,9 +20,9 @@ def print_confusion(cm):
 
 def check_overflow_bounds(W1_q, b1_q, W2_q, b2_q, input_max=16, input_size=64, hidden_size=16):
 
-    worst_acc1 = input_max * 127 * input_size + np.abs(b1_q).max()
+    worst_acc1 = input_max * 7 * input_size + np.abs(b1_q).max()
     worst_hidden = worst_acc1  
-    worst_acc2 = worst_hidden * 127 * hidden_size + np.abs(b2_q).max()
+    worst_acc2 = worst_hidden * 7 * hidden_size + np.abs(b2_q).max()
 
     int32_max = 2**31 - 1
     print(f"[overflow] pior caso teórico do acumulador da camada 1: {worst_acc1:,}")

@@ -1,8 +1,8 @@
 # sub2k-nn
 
-**Reconhecimento de dígitos manuscritos com uma rede neural quantizada (int8) rodando dentro de um Arduino Uno (2KB de RAM) — 96,7% de acurácia, 1,26KB de flash, sem nenhuma biblioteca de ML no firmware.**
+**Reconhecimento de dígitos manuscritos com uma rede neural duplamente quantizada (int4/bit-packed) rodando dentro de um Arduino Uno (2KB de RAM) — 92,5% de acurácia, 696 bytes de flash, sem nenhuma biblioteca de ML no firmware.**
 
-O problema que isso resolve: rodar uma rede neural "de verdade" num microcontrolador de 8 bits normalmente significa depender de frameworks pesados (TensorFlow Lite Micro, uTensor) ou aceitar que ponto flutuante vai comer a RAM escassa. O `sub2k-nn` treina a rede inteira em Python/float, quantiza os pesos pra `int8` uma única vez, e o firmware só faz multiplicação e soma em inteiros contra uma tabela fixa em `PROGMEM` — sem `float`, sem framework, sem alocação dinâmica.
+O problema que isso resolve: rodar uma rede neural "de verdade" num microcontrolador de 8 bits normalmente significa depender de frameworks pesados (TensorFlow Lite Micro, uTensor) ou aceitar que ponto flutuante vai comer a RAM escassa. O `sub2k-nn` treina a rede inteira em Python/float, quantiza os pesos pra `int4` empacotados, e o firmware só faz multiplicação e soma em inteiros contra uma tabela fixa em `PROGMEM` — sem `float`, sem framework, processando a tabela lendo dois neurônios simultaneamente por byte.
 
 Faz parte da mesma série de experimentos de restrição extrema em hardware do ecossistema **DevSoft JARVIS AI**, ao lado de [`sub2k-intent`](../sub2k-intent), [`sub2k-face`](../sub2k-face), [`sub2k-kws`](../sub2k-kws) e [`uno-nvscript`](../uno-nvscript). Junto com o `sub2k-intent` (hashing) e o `sub2k-face` (projeção PCA), fecha o trio das três famílias clássicas de classificação sob a mesma restrição de 2KB: **hashing**, **projeção linear** e **rede neural**.
 
@@ -10,9 +10,9 @@ Faz parte da mesma série de experimentos de restrição extrema em hardware do 
 
 ## A ideia central
 
-- **O treino fica no PC.** A rede aprende em float, com todo o ferramental normal (`scikit-learn`), sobre um dataset real de dígitos manuscritos 8×8 — o Uno nunca treina nada, só executa.
-- **O comportamento vira uma tabela de pesos, não código novo.** Depois de treinada, a rede é quantizada e exportada como `nn_table.h`, incluído direto no firmware via `PROGMEM` — trocar o que a rede reconhece é gerar uma tabela nova, não reescrever a lógica de inferência.
-- **Decisão em aritmética inteira.** O Uno só faz `int8 × int8` acumulado em `int32`, ReLU e `argmax` — sem `float`, sem `sqrt()`, sem biblioteca de ML.
+- **O treino fica no PC (Treino com Ruído AMM).** A rede aprende em float, e o treinamento agora simula "Defeitos de Hardware" na matriz inserindo ruído no dataset, baseando-se no Paradoxo de Regularização. Isso força a rede a se blindar para perdas gigantescas de quantização.
+- **O comportamento vira uma tabela de pesos empacotados.** Depois de treinada, a rede tem os seus pesos cortados para `int4` (de -8 a +7), e os pares de pesos são unidos num único byte (bit-packing). O arquivo exportado é o `nn_table.h`, incluído direto no firmware via `PROGMEM`.
+- **Decisão em aritmética inteira e Loop Unrolling.** O Uno puxa o byte da Flash, separa os dois pesos `int4`, e executa as multiplicações simuladas em dois neurônios paralelamente em 1 único laço, acumulados em `int32` — rápido, super otimizado e sem ponto flutuante.
 
 ## Arquitetura da rede (64 → 16 → 10)
 
@@ -22,7 +22,7 @@ Faz parte da mesma série de experimentos de restrição extrema em hardware do 
 | Oculta | 16 | `ReLU(entrada @ W1 + b1)` |
 | Saída | 10 | `entrada_oculta @ W2 + b2`, uma pontuação por dígito (0-9) |
 
-A camada oculta e a de saída somam **1.184 pesos + 26 biases**, quantizados em `int8`/`int32` — a tabela inteira cabe em 1,26KB de flash.
+A camada oculta e a de saída somam **1.184 pesos + 26 biases**, quantizados em `int4` empacotados (dois pesos por byte) — a tabela inteira, impressionantemente, caiu para **696 bytes de flash**.
 
 ## Arquitetura (treino no PC, inferência no Uno)
 
@@ -43,12 +43,12 @@ O treino roda uma vez (ou toda vez que o dataset mudar); a inferência no Uno é
 
 | Métrica | Valor |
 |---|---|
-| Acurácia do modelo em float (referência) | 96,4% |
-| Acurácia do modelo quantizado (int8, aritmética inteira) | **96,7%** |
-| Perda de acurácia por causa da quantização | **-0,3 pp** (na prática, nula) |
-| Tamanho da tabela de pesos em flash | **1,26 KB** |
+| Acurácia do modelo em float (referência) | 96,9% (treinado com Data Augmentation AMM) |
+| Acurácia do modelo duplamente quantizado (int4) | **92,5%** |
+| Perda de acurácia por causa da quantização | **-4,4 pp** (Excelente para uma precisão de meio-byte) |
+| Tamanho da tabela de pesos em flash | **696 bytes (0,68 KB)** |
 | RAM usada em runtime (ativações) | ~80 bytes (16 acumuladores int32 + buffer de entrada) |
-| Margem de segurança contra overflow do acumulador int32 | 8,1x abaixo do limite |
+| Margem de segurança contra overflow int32 | **2.673x** abaixo do limite |
 
 A quantização não custou quase nada de acurácia — e a matriz de confusão mostra só um padrão de erro sistemático: o dígito **8 sendo confundido com 1** em 3 de 360 amostras de teste, um erro plausível mesmo pra um classificador maior, já que certas caligrafias de "8" ficam visualmente parecidas com "1" numa grade de só 8×8 pixels.
 
@@ -139,7 +139,7 @@ sub2k-nn/
 |---|---|---|---|---|
 | [`sub2k-intent`](../sub2k-intent) | Hashing de trigramas | Texto | ~1,5KB de flash pra 47 frases | 88% (15/17 no teste com casos difíceis) |
 | [`sub2k-face`](../sub2k-face) | Projeção linear (PCA/Eigenfaces) | Imagem | ~44 bytes por identidade cadastrada | 100% em dados sintéticos validados; fotos reais ainda pendentes |
-| **`sub2k-nn`** | Rede neural (MLP 2 camadas) | Imagem | **1,26KB** pra 64→16→10 | **96,7%** em dataset real |
+| **`sub2k-nn`** | Rede neural (MLP 2 camadas) | Imagem | **696 bytes** pra 64→16→10 (Bit-Packed INT4) | **92,5%** em dataset real |
 
 O `sub2k-nn` é o mais "clássico" das três abordagens (é literalmente uma rede neural, só que pequena e quantizada), e também o único treinado e validado inteiramente sobre dados reais (não sintéticos) desde o início.
 

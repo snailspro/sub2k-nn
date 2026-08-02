@@ -17,6 +17,15 @@ def load_data():
 
 
 def train_float_model(X_train, y_train):
+    rng = np.random.default_rng(RANDOM_STATE)
+    noise = rng.uniform(-1.5, 1.5, X_train.shape)
+    X_train_noisy = X_train + noise
+    
+    X_train_aug = np.vstack((X_train, X_train_noisy))
+    y_train_aug = np.hstack((y_train, y_train))
+    
+    print(f"[AMM] Aplicando Ruido Tensorial (Augmentation). Dataset dobrou para {X_train_aug.shape[0]} amostras.")
+
     clf = MLPClassifier(
         hidden_layer_sizes=(HIDDEN_UNITS,),
         activation="relu",
@@ -25,13 +34,13 @@ def train_float_model(X_train, y_train):
         max_iter=3000,
         random_state=RANDOM_STATE,
     )
-    clf.fit(X_train, y_train)
+    clf.fit(X_train_aug, y_train_aug)
     return clf
 
 
 def quantize_layer(W: np.ndarray, b: np.ndarray, upstream_scale: float = 1.0):
     max_abs = np.abs(W).max()
-    scale = 127.0 / max_abs if max_abs > 0 else 1.0
+    scale = 7.0 / max_abs if max_abs > 0 else 1.0
     W_q = np.round(W * scale).astype(np.int8)
 
     total_scale = upstream_scale * scale
@@ -73,25 +82,37 @@ def export_c_header(path, W1_q, b1_q, W2_q, b2_q, input_size, hidden_units, num_
         f.write(f"#define NN_HIDDEN_SIZE {hidden_units}\n")
         f.write(f"#define NN_NUM_CLASSES {num_classes}\n\n")
 
-        f.write(f"const int8_t NN_W1[NN_INPUT_SIZE][NN_HIDDEN_SIZE] PROGMEM = {{\n")
+        f.write(f"const uint8_t NN_W1[NN_INPUT_SIZE][NN_HIDDEN_SIZE / 2] PROGMEM = {{\n")
         for row in W1_q:
-            f.write("  { " + ", ".join(str(int(v)) for v in row) + " },\n")
+            packed_row = []
+            for j in range(0, hidden_units, 2):
+                w0 = row[j] & 0x0F
+                w1 = row[j+1] & 0x0F
+                packed = (w0 << 4) | w1
+                packed_row.append(str(packed))
+            f.write("  { " + ", ".join(packed_row) + " },\n")
         f.write("};\n\n")
 
         f.write(f"const int32_t NN_B1[NN_HIDDEN_SIZE] PROGMEM = {{\n  ")
         f.write(", ".join(str(int(v)) for v in b1_q))
         f.write("\n};\n\n")
 
-        f.write(f"const int8_t NN_W2[NN_HIDDEN_SIZE][NN_NUM_CLASSES] PROGMEM = {{\n")
+        f.write(f"const uint8_t NN_W2[NN_HIDDEN_SIZE][NN_NUM_CLASSES / 2] PROGMEM = {{\n")
         for row in W2_q:
-            f.write("  { " + ", ".join(str(int(v)) for v in row) + " },\n")
+            packed_row = []
+            for k in range(0, num_classes, 2):
+                w0 = row[k] & 0x0F
+                w1 = row[k+1] & 0x0F
+                packed = (w0 << 4) | w1
+                packed_row.append(str(packed))
+            f.write("  { " + ", ".join(packed_row) + " },\n")
         f.write("};\n\n")
 
         f.write(f"const int32_t NN_B2[NN_NUM_CLASSES] PROGMEM = {{\n  ")
         f.write(", ".join(str(int(v)) for v in b2_q))
         f.write("\n};\n")
 
-    total_bytes = W1_q.nbytes + b1_q.nbytes + W2_q.nbytes + b2_q.nbytes
+    total_bytes = (W1_q.size // 2) + b1_q.nbytes + (W2_q.size // 2) + b2_q.nbytes
     print(f"[export] header C escrito em {path} ({total_bytes} bytes de tabela, "
           f"{total_bytes/1024:.2f} KB)")
 
