@@ -1,4 +1,3 @@
-
 #include <avr/pgmspace.h>
 #include "nn_table.h"
 
@@ -8,18 +7,15 @@
 void setup() {
   Serial.begin(9600);
   Serial.setTimeout(SERIAL_TIMEOUT_MS);
-  Serial.println(F("sub2k-nn pronto. Envie [0xAA][64 pixels][checksum]."));
+  Serial.println(F("sub2k-nn (Ensemble) pronto. Envie [0xAA][64 pixels][checksum]."));
   Serial.print(F("Tabela: "));
-  Serial.print(INPUT_DIM);
-  Serial.print(F(" entradas ativas, "));
+  Serial.print(NUM_MODELS);
+  Serial.print(F(" Redes de "));
   Serial.print(HIDDEN_DIM);
-  Serial.print(F(" ocultos, "));
-  Serial.print(OUTPUT_DIM);
-  Serial.println(F(" classes."));
+  Serial.println(F(" ocultos."));
 }
 
-
-int8_t infer(const uint8_t* raw_pixels, int32_t* outScores) {
+void infer_single_network(const uint8_t* raw_pixels, int32_t* outScores, const uint8_t W1[][HIDDEN_DIM/2], const int32_t* B1, const uint8_t W2[][OUTPUT_DIM/2], const int32_t* B2) {
   int32_t hidden[HIDDEN_DIM];
 
   for (uint8_t j = 0; j < HIDDEN_DIM; j += 2) {
@@ -37,9 +33,6 @@ int8_t infer(const uint8_t* raw_pixels, int32_t* outScores) {
     hidden[j+1] = acc1 > 0 ? acc1 : 0; 
   }
 
-  
-  int8_t bestClass = 0;
-  int32_t bestScore = -2147483647L;
   for (uint8_t k = 0; k < OUTPUT_DIM; k += 2) {
     int32_t acc0 = (int32_t)pgm_read_dword(&B2[k]);
     int32_t acc1 = (int32_t)pgm_read_dword(&B2[k+1]);
@@ -51,17 +44,36 @@ int8_t infer(const uint8_t* raw_pixels, int32_t* outScores) {
       acc1 += hidden[j] * w1;
     }
     outScores[k] = acc0;
-    if (acc0 > bestScore) {
-      bestScore = acc0;
-      bestClass = k;
-    }
     outScores[k+1] = acc1;
-    if (acc1 > bestScore) {
-      bestScore = acc1;
-      bestClass = k+1;
-    }
   }
+}
 
+int8_t infer_ensemble(const uint8_t* raw_pixels, int32_t* outScoresTotal) {
+  for(uint8_t k=0; k<OUTPUT_DIM; k++) outScoresTotal[k] = 0;
+  
+  for(uint8_t m=0; m<NUM_MODELS; m++) {
+      int32_t scores_tmp[OUTPUT_DIM];
+      
+      const uint8_t (*w1_ptr)[HIDDEN_DIM/2] = (const uint8_t (*)[HIDDEN_DIM/2])pgm_read_word(&W1_PTRS[m]);
+      const int32_t* b1_ptr = (const int32_t*)pgm_read_word(&B1_PTRS[m]);
+      const uint8_t (*w2_ptr)[OUTPUT_DIM/2] = (const uint8_t (*)[OUTPUT_DIM/2])pgm_read_word(&W2_PTRS[m]);
+      const int32_t* b2_ptr = (const int32_t*)pgm_read_word(&B2_PTRS[m]);
+      
+      infer_single_network(raw_pixels, scores_tmp, w1_ptr, b1_ptr, w2_ptr, b2_ptr);
+      
+      for(uint8_t k=0; k<OUTPUT_DIM; k++) {
+          outScoresTotal[k] += scores_tmp[k];
+      }
+  }
+  
+  int8_t bestClass = 0;
+  int32_t bestScore = -2147483647L;
+  for(uint8_t k=0; k<OUTPUT_DIM; k++) {
+      if (outScoresTotal[k] > bestScore) {
+          bestScore = outScoresTotal[k];
+          bestClass = k;
+      }
+  }
   return bestClass;
 }
 
@@ -94,7 +106,7 @@ void loop() {
   }
 
   int32_t scores[OUTPUT_DIM];
-  int8_t pred = infer(pixels, scores);
+  int8_t pred = infer_ensemble(pixels, scores);
 
   Serial.print(F("PRED="));
   Serial.print(pred);
