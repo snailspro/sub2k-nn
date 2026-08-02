@@ -1,7 +1,10 @@
 import numpy as np
-from sklearn.neural_network import MLPClassifier
 from sklearn.datasets import load_digits
 from sklearn.model_selection import train_test_split
+
+# NOTE: Nós deliberadamente NÃO usamos o sklearn.neural_network.MLPClassifier.
+# Toda a inteligência da rede, backpropagation, QAT e STE foi escrita do zero
+# em NumPy para garantir o controle subatômico sobre a quantização do hardware.
 
 RANDOM_STATE = 42
 NUM_MODELS = 3
@@ -33,9 +36,106 @@ def diophantine_qmc_noise(shape, scale=1.5, seed_offset=0):
     noise = (qmc_01 * 2 * scale) - scale
     return noise.reshape(shape)
 
+class CustomQATMLP:
+    """
+    Rede Neural escrita do zero em puro NumPy com suporte a:
+    - Otimizador Adam
+    - Quantization-Aware Training (QAT)
+    - Straight-Through Estimator (STE) para driblar a ausência de derivadas no truncamento INT4.
+    """
+    def __init__(self, input_size, hidden_size, output_size, seed=42):
+        np.random.seed(seed)
+        self.W1 = np.random.randn(input_size, hidden_size) * np.sqrt(2. / input_size)
+        self.b1 = np.zeros(hidden_size)
+        self.W2 = np.random.randn(hidden_size, output_size) * np.sqrt(2. / hidden_size)
+        self.b2 = np.zeros(output_size)
+        
+    def q_W(self, w):
+        return np.clip(np.round(w * 8.0), -8, 7) / 8.0
+        
+    def q_b1(self, b):
+        return np.round(b * 8.0) / 8.0
+
+    def q_b2(self, b):
+        return np.round(b * 64.0) / 64.0
+        
+    def forward(self, X):
+        self.X = X
+        # Aplicação da restrição física no Forward (QAT)
+        self.W1_q = self.q_W(self.W1)
+        self.b1_q = self.q_b1(self.b1)
+        self.W2_q = self.q_W(self.W2)
+        self.b2_q = self.q_b2(self.b2)
+        
+        self.Z1 = self.X @ self.W1_q + self.b1_q
+        self.A1 = np.maximum(self.Z1, 0)
+        self.Z2 = self.A1 @ self.W2_q + self.b2_q
+        
+        # Softmax e Cross Entropy
+        exp_scores = np.exp(self.Z2 - np.max(self.Z2, axis=1, keepdims=True))
+        self.probs = exp_scores / np.sum(exp_scores, axis=1, keepdims=True)
+        return self.probs
+        
+    def backward(self, y, lr=0.005, weight_decay=1e-4):
+        m = y.shape[0]
+        dZ2 = self.probs.copy()
+        dZ2[range(m), y] -= 1
+        dZ2 /= m
+        
+        # STE (Straight-Through Estimator):
+        # A rede flui o gradiente através das matrizes quantizadas como se fossem as matrizes perfeitas!
+        dW2 = self.A1.T @ dZ2
+        db2 = np.sum(dZ2, axis=0)
+        
+        dA1 = dZ2 @ self.W2_q.T
+        dZ1 = dA1.copy()
+        dZ1[self.Z1 <= 0] = 0
+        
+        dW1 = self.X.T @ dZ1
+        db1 = np.sum(dZ1, axis=0)
+        
+        # Regularização L2
+        dW2 += weight_decay * self.W2
+        dW1 += weight_decay * self.W1
+        
+        # Otimizador Adam Manual
+        if not hasattr(self, 'm_W1'):
+            self.m_W1, self.v_W1 = np.zeros_like(self.W1), np.zeros_like(self.W1)
+            self.m_b1, self.v_b1 = np.zeros_like(self.b1), np.zeros_like(self.b1)
+            self.m_W2, self.v_W2 = np.zeros_like(self.W2), np.zeros_like(self.W2)
+            self.m_b2, self.v_b2 = np.zeros_like(self.b2), np.zeros_like(self.b2)
+            self.t = 0
+            
+        self.t += 1
+        beta1, beta2, eps = 0.9, 0.999, 1e-8
+        
+        for w, dw, m_w, v_w in [
+            (self.W1, dW1, self.m_W1, self.v_W1),
+            (self.b1, db1, self.m_b1, self.v_b1),
+            (self.W2, dW2, self.m_W2, self.v_W2),
+            (self.b2, db2, self.m_b2, self.v_b2)
+        ]:
+            m_w[:] = beta1 * m_w + (1 - beta1) * dw
+            v_w[:] = beta2 * v_w + (1 - beta2) * (dw ** 2)
+            m_hat = m_w / (1 - beta1 ** self.t)
+            v_hat = v_w / (1 - beta2 ** self.t)
+            w -= lr * m_hat / (np.sqrt(v_hat) + eps)
+            
+    def train(self, X, y, epochs=1500, lr=0.01):
+        for epoch in range(epochs):
+            self.forward(X)
+            self.backward(y, lr)
+            
+    def predict_proba(self, X):
+        return self.forward(X)
+        
+    def score(self, X, y):
+        probs = self.forward(X)
+        return np.mean(np.argmax(probs, axis=1) == y)
+
 def train_ensemble(X_train, y_train):
     models = []
-    print(f"[Ensemble] Treinando {NUM_MODELS} redes neurais independentes de {HIDDEN_UNITS} neurônios...")
+    print(f"[QAT Ensemble] Treinando {NUM_MODELS} redes neurais do zero (NumPy + STE)...")
     
     for i in range(NUM_MODELS):
         noise = diophantine_qmc_noise(X_train.shape, scale=1.5, seed_offset=i*999)
@@ -44,26 +144,23 @@ def train_ensemble(X_train, y_train):
         X_train_aug = np.vstack((X_train, X_train_noisy))
         y_train_aug = np.hstack((y_train, y_train))
         
-        clf = MLPClassifier(
-            hidden_layer_sizes=(HIDDEN_UNITS,),
-            activation="relu",
-            solver="adam",
-            alpha=1e-3,
-            max_iter=3000,
-            random_state=RANDOM_STATE + i,
-        )
-        clf.fit(X_train_aug, y_train_aug)
+        clf = CustomQATMLP(input_size=X_train.shape[1], hidden_size=HIDDEN_UNITS, output_size=10, seed=RANDOM_STATE + i)
+        
+        # Usaremos 2500 epochs para dar tempo da rede convergir via QAT com Adam
+        clf.train(X_train_aug, y_train_aug, epochs=2500, lr=0.005)
+        
         models.append(clf)
-        print(f"  -> Rede {i+1}/{NUM_MODELS} treinada. Acurácia no treino: {clf.score(X_train, y_train)*100:.1f}%")
+        print(f"  -> Rede {i+1}/{NUM_MODELS} treinada. Acurácia Float (QAT) no treino: {clf.score(X_train, y_train)*100:.1f}%")
         
     return models
 
-def quantize_weights(coefs, intercepts):
-    W1, W2 = coefs
-    b1, b2 = intercepts
-    W1_q = np.round(W1 * 8.0).astype(np.int8)
-    W2_q = np.round(W2 * 8.0).astype(np.int8)
-    return W1_q, b1.astype(np.int32), W2_q, b2.astype(np.int32)
+def quantize_weights(model):
+    # A extração agora é direta porque a rede JÁ SABE que é INT4!
+    W1_q = np.clip(np.round(model.W1 * 8.0), -8, 7).astype(np.int8)
+    W2_q = np.clip(np.round(model.W2 * 8.0), -8, 7).astype(np.int8)
+    b1_q = np.round(model.b1 * 8.0).astype(np.int32)
+    b2_q = np.round(model.b2 * 64.0).astype(np.int32)
+    return W1_q, b1_q, W2_q, b2_q
 
 def forward_int(x: np.ndarray, W1_q, b1_q, W2_q, b2_q):
     x_int = np.round(x).astype(np.int32)
@@ -91,8 +188,8 @@ def export_c_header(ensemble_weights, active_pixels, filename="firmware/sub2k_nn
     output_dim = ensemble_weights[0][2].shape[1]
 
     with open(filename, "w") as f:
-        f.write("// Arquivo gerado automaticamente pelo train_nn.py\n")
-        f.write("// ENSEMBLE VOTING: 3 Redes Neurais em PROGMEM\n")
+        f.write("// Arquivo gerado automaticamente pelo motor manual QAT (train_nn.py)\n")
+        f.write("// ENSEMBLE VOTING + Quantization-Aware Training\n")
         f.write("#pragma once\n")
         f.write("#include <stdint.h>\n")
         f.write("#include <avr/pgmspace.h>\n\n")
@@ -108,7 +205,6 @@ def export_c_header(ensemble_weights, active_pixels, filename="firmware/sub2k_nn
         for m_idx, w in enumerate(ensemble_weights):
             W1_q, b1_q, W2_q, b2_q = w
             
-            # Pack W1
             w1_packed = np.zeros((input_dim, hidden_dim // 2), dtype=np.uint8)
             for i in range(input_dim):
                 for j in range(0, hidden_dim, 2):
@@ -123,7 +219,6 @@ def export_c_header(ensemble_weights, active_pixels, filename="firmware/sub2k_nn
             
             f.write(f"const int32_t B1_{m_idx}[{hidden_dim}] PROGMEM = {{ " + ", ".join(str(int(v)) for v in b1_q) + " };\n\n")
             
-            # Pack W2
             w2_packed = np.zeros((hidden_dim, output_dim // 2), dtype=np.uint8)
             for i in range(hidden_dim):
                 for j in range(0, output_dim, 2):
@@ -152,7 +247,7 @@ def export_c_header(ensemble_weights, active_pixels, filename="firmware/sub2k_nn
 
 
 def main():
-    print("Iniciando treinamento e quantizacao do sub2k-nn (ENSEMBLE VOTING)...")
+    print("Iniciando motor matemático puro (Numpy QAT + Ensemble)...")
     
     X_train, X_test, y_train, y_test, active_pixels = load_data()
     print(f"[data] treino: {X_train.shape[0]} amostras | teste: {X_test.shape[0]} amostras | entrada: {X_train.shape[1]} pixels (pruned)")
@@ -167,18 +262,18 @@ def main():
         if np.argmax(scores) == yi:
             correct_float += 1
     acc_float = correct_float / len(X_test)
-    print(f"[float] acurácia no teste (Comitê Float, referência): {acc_float*100:.1f}%")
+    print(f"[float] acurácia no teste (Comitê Float Simulado, referência): {acc_float*100:.1f}%")
     
     ensemble_weights = []
     for clf in models:
-        ensemble_weights.append(quantize_weights(clf.coefs_, clf.intercepts_))
+        ensemble_weights.append(quantize_weights(clf))
     
     acc_int_train = evaluate_ensemble_quantized(X_train, y_train, ensemble_weights)
-    print(f"[int8] acurácia no treino (Comitê Quantizado): {acc_int_train*100:.1f}%")
+    print(f"[int8] acurácia no treino (Arduino INT4 Hard-Voted): {acc_int_train*100:.1f}%")
     
     acc_int_test = evaluate_ensemble_quantized(X_test, y_test, ensemble_weights)
-    print(f"[int8] acurácia no teste  (Comitê Quantizado): {acc_int_test*100:.1f}%")
-    print(f"[int8] queda de acurácia por causa da quantização: {(acc_float - acc_int_test)*100:.1f} pontos percentuais")
+    print(f"[int8] acurácia no teste  (Arduino INT4 Hard-Voted): {acc_int_test*100:.1f}%")
+    print(f"[int8] gap entre Float vs INT4 final: {(acc_float - acc_int_test)*100:.1f} pontos percentuais")
     
     export_c_header(ensemble_weights, active_pixels)
     
