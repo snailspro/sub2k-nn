@@ -62,7 +62,7 @@ def main():
         print(f"  {count}x: dígito {real} confundido com {pred}")
 
     print()
-    check_overflow_bounds(data["W1_q"], data["b1_q"], data["W2_q"], data["b2_q"])
+    check_overflow_bounds(data["W1_list"][0], data["b1_list"][0], data["W2_list"][0], data["b2_list"][0])
 
 
 if __name__ == "__main__":
