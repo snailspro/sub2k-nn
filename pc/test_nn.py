@@ -1,8 +1,5 @@
-
-
 import numpy as np
 from nn_sim import QuantizedNN
-
 
 def confusion_matrix(nn, X, y, num_classes=10):
     cm = np.zeros((num_classes, num_classes), dtype=int)
@@ -11,18 +8,15 @@ def confusion_matrix(nn, X, y, num_classes=10):
         cm[yi][pred] += 1
     return cm
 
-
 def print_confusion(cm):
     print("       " + " ".join(f"{i:4d}" for i in range(cm.shape[1])) + "   <- previsto")
     for i, row in enumerate(cm):
         print(f"real {i:2d}: " + " ".join(f"{v:4d}" for v in row))
 
-
 def check_overflow_bounds(W1_q, b1_q, W2_q, b2_q, input_max=16, input_size=64, hidden_size=16):
-
-    worst_acc1 = input_max * 7 * input_size + np.abs(b1_q).max()
+    worst_acc1 = input_max * 127 * input_size + np.abs(b1_q).max()
     worst_hidden = worst_acc1  
-    worst_acc2 = worst_hidden * 7 * hidden_size + np.abs(b2_q).max()
+    worst_acc2 = worst_hidden * 127 * hidden_size + np.abs(b2_q).max()
 
     int32_max = 2**31 - 1
     print(f"[overflow] pior caso teórico do acumulador da camada 1: {worst_acc1:,}")
@@ -31,7 +25,6 @@ def check_overflow_bounds(W1_q, b1_q, W2_q, b2_q, input_max=16, input_size=64, h
     margem = int32_max / worst_acc2
     print(f"[overflow] margem de segurança: {margem:.1f}x abaixo do limite de overflow")
     assert worst_acc2 < int32_max, "ALERTA: pior caso teórico estoura int32!"
-
 
 def main():
     data = np.load("pc/nn_table.npz")
@@ -62,8 +55,7 @@ def main():
         print(f"  {count}x: dígito {real} confundido com {pred}")
 
     print()
-    check_overflow_bounds(data["W1_list"][0], data["b1_list"][0], data["W2_list"][0], data["b2_list"][0])
-
+    check_overflow_bounds(data["W1"], data["b1"], data["W2"], data["b2"])
 
 if __name__ == "__main__":
     main()
